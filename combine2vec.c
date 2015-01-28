@@ -64,7 +64,7 @@ void AddWordToVocab(char *word, long long count) {
 }
 
 void ReadVocab() {
-	long long count;
+	long long count, a;
 	char word[MAX_STRING_LENGTH], format[20];
 	FILE *fid;
 	fid = fopen(vocab_file, "r");
@@ -74,6 +74,11 @@ void ReadVocab() {
 		AddWordToVocab(word, count);
 	}
 	fclose(fid);
+
+	for (a = 0; a < vocab_size; a++) {
+		vocab[a].code = (char *)calloc(MAX_CODE_LENGTH, sizeof(char));
+		vocab[a].point = (int *)calloc(MAX_CODE_LENGTH, sizeof(int));
+	}
 }
 
 void CreateBinaryTree() {
@@ -112,11 +117,12 @@ void CreateBinaryTree() {
 			min2i = pos2;
 			pos2++;
 		}
+
+		count[vocab_size + a] = count[min1i] + count[min2i];
+		parent_node[min1i] = vocab_size + a;
+		parent_node[min2i] = vocab_size + a;
+		binary[min2i] = 1;
 	}
-	count[vocab_size + a] = count[min1i] + count[min2i];
-	parent_node[min1i] = vocab_size + a;
-	parent_node[min2i] = vocab_size + a;
-	binary[min2i] = 1;
 
 	for (a = 0; a < vocab_size; a++) {
 		b = a;
@@ -175,6 +181,7 @@ int main()
 	strcpy(vocab_file, "vocab.txt");
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
 	ReadVocab();
+	CreateBinaryTree();
 
 	return 0;
 }
