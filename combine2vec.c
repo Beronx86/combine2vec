@@ -1,4 +1,6 @@
 // combine count and predic word embedding
+// Two strategy for word representation. input & output (current & context) is the same or different.
+// This is the first strategy, input & output are the same.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +11,8 @@
 #define _FILE_OFFSET_BITS 64
 #define MAX_STRING_LENGTH 100
 #define MAX_CODE_LENGTH 40
+#define MAX_EXP 6
+#define EXP_TABLE_SIZE 1000
 
 typedef double real;
 
@@ -26,27 +30,47 @@ typedef struct vocab_word {
 
 int verbose = 2; // 0, 1, or 2
 int num_threads = 8; // pthreads
-int num_iter = 25; // Number of full passes through cooccurrence matrix
+int adagrad;
+int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
-int use_binary = 1; // 0: save as text files; 1: save as binary; 2: both. For binary, save both word and context word vectors.
-int model = 2; // For text file output only. 0: concatenate word and context vectors (and biases) i.e. save everything; 1: Just save word vectors (no bias); 2: Save (word + context word) vectors (no biases)
-real eta = 0.05; // Initial learning rate
-real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
-// real *W, *gradsq, *cost;
-// Two strategy for word representation. input & output (current & context) is the same or different.
-// This is the first strategy, input & output are the same.
-real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the i in glove Xij)
-VWORD *vocab;
 int vector_size = 50; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
-char vocab_file[MAX_STRING_LENGTH], input_file[MAX_STRING_LENGTH], *save_W_file, *save_gradsq_file;
+long long word_count_actual = 0;
+char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
+real learn_rate = 0.05, starting_learn_rate; // Initial learning rate
+// real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
+real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the i in glove Xij)
+real *cost;
+VWORD *vocab;
+clock_t start;
 
 int hs = 0, negative = 5;
+const int table_size = 1e8;
+int *table;
 
 /* Efficient string comparison */
 int scmp( char *s1, char *s2 ) {
     while(*s1 != '\0' && *s1 == *s2) {s1++; s2++;}
     return(*s1 - *s2);
+}
+
+
+void InitUnigramTable() {
+  int a, i;
+  long long train_words_pow = 0;
+  real d1, power = 0.75;
+  table = (int *)malloc(table_size * sizeof(int));
+  for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);
+  i = 0;
+  d1 = pow(vocab[i].cn, power) / (real)train_words_pow;
+  for (a = 0; a < table_size; a++) {
+    table[a] = i;
+    if (a / (real)table_size > d1) {
+      i++;
+      d1 += pow(vocab[i].cn, power) / (real)train_words_pow;
+    }
+    if (i >= vocab_size) i = vocab_size - 1;
+  }
 }
 
 void AddWordToVocab(char *word, long long count) {
@@ -173,15 +197,151 @@ void InitNet()
 }
 
 
+void *TrainModelThread(void *vid) {
+	long long a, b, c, d;
+	long long l1, l2, word1, word2, target, label;
+	long long local_iter = num_iter, word_count = 0, last_word_count = 0;
+	long long id = (long long) vid;
+	unsigned long long next_random = (long long) id;
+	real f, predict_grad, count_grad;
+	real *neu1e = (real *)calloc(vector_size, sizeof(real));
+	CREC cr;
+	FILE fin;
+	clock_t now;
+	fin = fopen(train_file, "rb");
+	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
+	cost[id] = 0;
+
+	// for (a = 0; a < lines_per_thread[id]; a++) {
+	while(1){
+		if (word_count - last_word_count > 10000) {
+			word_count_actual += word_count - last_word_count;
+			last_word_count = word_count;
+			if (verbose > 1) {
+				now = clock();
+				if (!adagrad)
+				{
+					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk ", 13,
+							learn_rate, word_count_actual / (real)(num_iter * num_lines + 1) * 100,
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+					fflush(stderr);
+				} else {
+					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk ", 13,
+							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+				}
+			}
+			if (!adagrad) {
+				learn_rate = starting_learn_rate * (1 - word_count_actual / (real)(num_iter * num_lines + 1));
+				if (learn_rate < starting_learn_rate * 0.0001) learn_rate = starting_learn_rate * 0.0001;
+			}
+		}
+
+		if (feof(fin) || (word_count > lines_per_thread[id])) {
+			word_count_actual += word_count - last_word_count;
+			local_iter--;
+			if (local_iter == 0) break;
+			word_count = 0;
+			last_word_count = 0;
+			fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
+		}
+
+		fread(&cr, sizeof(CREC), 1, fin);
+		if (feof(fin)) continue;
+
+		word1 = cr.word1 - 1LL; // input word (current word)
+		l1 = word1 * vector_size;
+		word2 = cr.word2 - 1LL; // output word (context word)
+		// l2 = word2 * vector_size;
+		// Optimize predict error
+		for (c = 0; c < vector_size; c++) neu1e[c] = 0;
+
+		if (hs) for (d = 0; d < vocab[word2].codelen; d++) {
+			f = 0;
+			l2 = vocab[word2].point[d] * vector_size;
+
+			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
+			if (f <= -MAX_EXP) continue;
+			else if (f >= MAX_EXP) continue;
+			else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
+
+			predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
+			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
+			for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
+		}
+
+		if (negative > 0) for (d = 0; d < negative + 1; d++) {
+			if (d == 0) {
+				target = word2;
+				label = 1;
+			} else {
+				next_random = next_random * (unsigned long long)25214903917 + 11;
+				target = table[(next_random >> 16) % table_size];
+				if (target == 0) target = next_random % (vocab_size - 1) + 1;
+				if (target == word2) continue;
+				label = 0;
+			}
+
+			l2 = target * vector_size;
+			f = 0;
+			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l1];
+			if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
+			else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
+			else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+		}
+		for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
+
+		// Optimize count error
+	}
+
+}
+
+void TrainModel() {
+	long long file_size;
+	long long a, b, c, d;
+	FILE *fin, *fo;
+	pthread_t *pt = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
+
+	fprintf(stderr, "Strating training using file %s.\n", train_file);
+	starting_learn_rate = learn_rate;
+	if (vocab_file[0] != 0) ReadVocab(); else {fprint(stderr, "Vocab file is not speicied.\n"); exit(1);}
+	if (output_file[0] == 0) {fprint(stderr, "Output file is not specified.\n"); exit(1);}
+	InitNet();
+	if (negative > 0) InitUnigramTable();
+
+	fin = fopen(train_file, "rb");
+	if (fin == NULL) {fprintf(stderr, "Unable to open coocurrence file %s.\n", train_file); exit(1);}
+	fseek(fin, 0, SEEK_END);
+	file_size = ftello(fin);
+	num_lines = file_size / sizeof(CREC);
+	fclose(fin);
+	fprint(stderr, "Read %lld lines.\n", num_lines);
+
+	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
+	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
+	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
+
+	start = clock();
+	for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
+	for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+
+	cost = malloc(sizeof(real) * num_threads);
+
+}
 
 int main()
 {
-
+	int i;
 	//Initialize the vocab with vocab_max_size
 	strcpy(vocab_file, "vocab.txt");
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
 	ReadVocab();
-	CreateBinaryTree();
 
+	expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
+	for (i = 0; i < EXP_TABLE_SIZE; i++) {
+		expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
+		expTable[i] = expTable[i] / (expTable[i] + 1);                   // Precompute f(x) = x / (x + 1)
+	}
 	return 0;
 }
