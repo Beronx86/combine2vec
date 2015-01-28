@@ -7,7 +7,8 @@
 #include <pthread.h>
 
 #define _FILE_OFFSET_BITS 64
-#define MAX_STRING_LENGTH 1000
+#define MAX_STRING_LENGTH 100
+#define MAX_CODE_LENGTH 40
 
 typedef double real;
 
@@ -20,7 +21,7 @@ typedef struct cooccur_rec {
 typedef struct vocab_word {
 	long long cn;
 	int *point;
-	char *word, *code, codelent;
+	char *word, *code, codelen;
 } VWORD;
 
 int verbose = 2; // 0, 1, or 2
@@ -38,7 +39,9 @@ real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the
 VWORD *vocab;
 int vector_size = 50; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
-char *vocab_file, *input_file, *save_W_file, *save_gradsq_file;
+char vocab_file[MAX_STRING_LENGTH], input_file[MAX_STRING_LENGTH], *save_W_file, *save_gradsq_file;
+
+int hs = 0, negative = 5;
 
 /* Efficient string comparison */
 int scmp( char *s1, char *s2 ) {
@@ -49,7 +52,6 @@ int scmp( char *s1, char *s2 ) {
 void AddWordToVocab(char *word, long long count) {
 	unsigned int length = strlen(word) + 1;
 	if (length > MAX_STRING_LENGTH) length = MAX_STRING_LENGTH;
-	vocab_size++; // according to glove/cooccure.c word id start form 1
 	vocab[vocab_size].word = (char *)calloc(length, sizeof(char));
 	strcpy(vocab[vocab_size].word, word);
 	vocab[vocab_size].cn = count;
@@ -58,6 +60,7 @@ void AddWordToVocab(char *word, long long count) {
 		vocab_max_size += 1000;
 		vocab = (VWORD *)realloc(vocab, vocab_max_size * sizeof(VWORD));
 	}
+	vocab_size++; // NOTE that there is a dismatch betwen vocab index and cooccurance word index. according to glove/cooccure.c word id start form 1
 }
 
 void ReadVocab() {
@@ -65,30 +68,113 @@ void ReadVocab() {
 	char word[MAX_STRING_LENGTH], format[20];
 	FILE *fid;
 	fid = fopen(vocab_file, "r");
-	if (fid == NULL) {fprint(stderr, "Unable to open vocab file %s.\n", vocab_file); exit(1);}
-	sprintf("%%%ds %%lld", MAX_STRING_LENGTH);
+	if (fid == NULL) {fprintf(stderr, "Unable to open vocab file %s.\n", vocab_file); exit(1);}
+	sprintf(format, "%%%ds %%lld", MAX_STRING_LENGTH);
 	while (fscanf(fid, format, word, &count) != EOF) {
 		AddWordToVocab(word, count);
 	}
-	flocse(fid);
+	fclose(fid);
+}
+
+void CreateBinaryTree() {
+	long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];
+	char code[MAX_CODE_LENGTH];
+	long long *count = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+	long long *binary = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+	long long *parent_node = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+	for (a = 0; a < vocab_size; a++) count[a] = vocab[a].cn;
+	for (a = vocab_size; a < 2 * vocab_size; a++) count[a] = 1e15;
+	pos1 = vocab_size - 1;
+	pos2 = vocab_size;
+
+	for (a = 0; a < vocab_size - 1; a++) {
+		if (pos1 >= 0) {
+			if (count[pos1] < count[pos2]) {
+				min1i = pos1;
+				pos1--;
+			} else {
+				min1i = pos2;
+				pos2++;
+			}
+		} else {
+			min1i = pos2;
+			pos2++;
+		}
+		if (pos1 >= 0) {
+			if (count[pos1] < count[pos2]) {
+				min2i = pos1;
+				pos1--;
+			} else {
+				min2i = pos2;
+				pos2++;
+			}
+		} else {
+			min2i = pos2;
+			pos2++;
+		}
+	}
+	count[vocab_size + a] = count[min1i] + count[min2i];
+	parent_node[min1i] = vocab_size + a;
+	parent_node[min2i] = vocab_size + a;
+	binary[min2i] = 1;
+
+	for (a = 0; a < vocab_size; a++) {
+		b = a;
+		i = 0;
+		while (1) {
+			code[i] = binary[b];
+			point[i] = b;
+			i++;
+			b = parent_node[b];
+			if (b == vocab_size * 2 - 2) break;
+		}
+		vocab[a].codelen = i;
+		vocab[a].point[0] = vocab_size - 2;
+		for (b = 0; b < i; b++) {
+			vocab[a].code[i - b - 1] = code[b];
+			vocab[a].code[i - b] = point[b] - vocab_size;
+		}
+	}
+	free(count);
+	free(binary);
+	free(parent_node);
 }
 
 
-
-/*
 void InitNet()
 {
 	long long a, b;
 	unsigned long long next_random = 1;
-	a = posix_mealign((void **)&syn0, 128, (long long)vocab_size * vector_size * sizeof(real));
-
+	a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * vector_size * sizeof(real));
+	if (syn0 == NULL) {fprintf(stderr, "Error allocating memory for syn0\n"), exit(1);}
+	if (hs) {
+		a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * vector_size * sizeof(real));
+		if (syn1 == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
+		for (a = 0; a < vocab_size; a++) for (b = 0; b < vocab_size; b++)
+			syn1[a * vocab_size + b] = 0;
+	}
+	if (negative > 0){
+		a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * vector_size * sizeof(real));
+		if (syn1 == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
+		for (a = 0; a < vocab_size; a++) for (b = 0; b < vocab_size; b++)
+			syn1neg[a * vocab_size + b] = 0;
+	}
+	for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++) {
+		next_random = next_random * (unsigned long long)25214903917 + 11;
+		syn0[a * vector_size + b] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / vector_size;
+	}
+	CreateBinaryTree();
 }
-*/
+
+
 
 int main()
 {
 
 	//Initialize the vocab with vocab_max_size
+	strcpy(vocab_file, "vocab.txt");
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
+	ReadVocab();
 
+	return 0;
 }
