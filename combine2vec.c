@@ -28,6 +28,8 @@ typedef struct vocab_word {
 	char *word, *code, codelen;
 } VWORD;
 
+int enable_predict = 1;
+int enable_count = 1;
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
 int num_threads = 1; // pthreads
