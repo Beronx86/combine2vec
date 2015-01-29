@@ -39,7 +39,7 @@ long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 250
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
 real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
-// real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
+real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *cost;
 VWORD *vocab;
@@ -204,14 +204,15 @@ void *TrainModelThread(void *vid) {
 	long long local_iter = num_iter, word_count = 0, last_word_count = 0;
 	long long id = (long long) vid;
 	unsigned long long next_random = (long long) id;
-	real f, predict_grad, count_grad;
+	real f, predict_grad, count_grad, f_count_grad;
+	real temp1, temp2;
 	real *neu1e = (real *)calloc(vector_size, sizeof(real));
 	CREC cr;
 	FILE *fin;
 	clock_t now;
 	fin = fopen(train_file, "rb");
 	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
-	// cost[id] = 0;
+	cost[id] = 0;
 
 	// for (a = 0; a < lines_per_thread[id]; a++) {
 	while(1){
@@ -255,48 +256,68 @@ void *TrainModelThread(void *vid) {
 		word1 = cr.word1 - 1LL; // input word (current word)
 		l1 = word1 * vector_size;
 		word2 = cr.word2 - 1LL; // output word (context word)
-		// l2 = word2 * vector_size;
+
 		// Optimize predict error
-		for (c = 0; c < vector_size; c++) neu1e[c] = 0;
+		if (enable_predict) {
+			for (c = 0; c < vector_size; c++) neu1e[c] = 0;
 
-		if (hs) for (d = 0; d < vocab[word2].codelen; d++) {
-			f = 0;
-			l2 = vocab[word2].point[d] * vector_size;
+			if (hs) for (d = 0; d < vocab[word2].codelen; d++) {
+				f = 0;
+				l2 = vocab[word2].point[d] * vector_size;
 
-			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
-			if (f <= -MAX_EXP) continue;
-			else if (f >= MAX_EXP) continue;
-			else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
+				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
+				if (f <= -MAX_EXP) continue;
+				else if (f >= MAX_EXP) continue;
+				else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
 
-			predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
-			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
-			for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
-		}
-
-		if (negative > 0) for (d = 0; d < negative + 1; d++) {
-			if (d == 0) {
-				target = word2;
-				label = 1;
-			} else {
-				next_random = next_random * (unsigned long long)25214903917 + 11;
-				target = table[(next_random >> 16) % table_size];
-				if (target == 0) target = next_random % (vocab_size - 1) + 1;
-				if (target == word2) continue;
-				label = 0;
+				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
+				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
+				for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
 			}
 
-			l2 = target * vector_size;
-			f = 0;
-			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
-			if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
-			else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
-			else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
-			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
-			for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
+			if (negative > 0) for (d = 0; d < negative + 1; d++) {
+				if (d == 0) {
+					target = word2;
+					label = 1;
+				} else {
+					next_random = next_random * (unsigned long long)25214903917 + 11;
+					target = table[(next_random >> 16) % table_size];
+					if (target == 0) target = next_random % (vocab_size - 1) + 1;
+					if (target == word2) continue;
+					label = 0;
+				}
+
+				l2 = target * vector_size;
+				f = 0;
+				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
+				if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
+				else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
+				else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+				for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
+			}
+			for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
 		}
-		for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
 
 		// Optimize count error
+		if (enable_predict) {
+			l2 = word2 * vector_size; //no bias version
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn0[b + l2]; // current and context word are represented by the same vector space
+			count_grad -= log(cr.val); //no bias version
+			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+			cost[id] += 0.5 * f_count_grad * count_grad;
+
+			f_count_grad *= learn_rate;
+			for (c = 0; c < vector_size; c++) {
+				temp1 = f_count_grad * syn0[c + l2];
+				temp2 = f_count_grad * syn0[c + l1];
+				if (!adagrad) {
+					syn0[b + l1] -= temp1;
+					syn0[b + l2] -= temp2;
+				}
+			}
+		}
 	}
 	fclose(fin);
 	free(neu1e);
@@ -341,7 +362,7 @@ void TrainModel() {
 	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
 	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
 	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
-	// cost = malloc(sizeof(real) * num_threads);
+	cost = malloc(sizeof(real) * num_threads);
 
 	start = clock();
 	for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
