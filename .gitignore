@@ -1,3 +1,7 @@
 /Debug/
 /combine2vec.exe.stackdump
 /vocab.txt
+/combine2vec.exe
+/cooccurrence.bin
+/cooccurrence.shuf.bin
+/combine.out.bin

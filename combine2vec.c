@@ -17,8 +17,8 @@
 typedef double real;
 
 typedef struct cooccur_rec {
-    long long word1;
-    long long word2;
+    int word1;
+    int word2;
     real val;
 } CREC;
 
@@ -29,15 +29,16 @@ typedef struct vocab_word {
 } VWORD;
 
 int verbose = 2; // 0, 1, or 2
-int num_threads = 8; // pthreads
-int adagrad;
-int num_iter = 5; // Number of full passes through cooccurrence matrix
+int binary = 1;
+int num_threads = 1; // pthreads
+int adagrad = 0;
+int num_iter = 25; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
-int vector_size = 50; // Word vector size
+int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.05, starting_learn_rate; // Initial learning rate
+real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
 // real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *cost;
@@ -180,14 +181,14 @@ void InitNet()
 	if (hs) {
 		a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * vector_size * sizeof(real));
 		if (syn1 == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
-		for (a = 0; a < vocab_size; a++) for (b = 0; b < vocab_size; b++)
-			syn1[a * vocab_size + b] = 0;
+		for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
+			syn1[a * vector_size + b] = 0;
 	}
 	if (negative > 0){
 		a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * vector_size * sizeof(real));
-		if (syn1 == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
-		for (a = 0; a < vocab_size; a++) for (b = 0; b < vocab_size; b++)
-			syn1neg[a * vocab_size + b] = 0;
+		if (syn1neg == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
+		for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
+			syn1neg[a * vector_size + b] = 0;
 	}
 	for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++) {
 		next_random = next_random * (unsigned long long)25214903917 + 11;
@@ -206,11 +207,11 @@ void *TrainModelThread(void *vid) {
 	real f, predict_grad, count_grad;
 	real *neu1e = (real *)calloc(vector_size, sizeof(real));
 	CREC cr;
-	FILE fin;
+	FILE *fin;
 	clock_t now;
 	fin = fopen(train_file, "rb");
 	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
-	cost[id] = 0;
+	// cost[id] = 0;
 
 	// for (a = 0; a < lines_per_thread[id]; a++) {
 	while(1){
@@ -229,6 +230,7 @@ void *TrainModelThread(void *vid) {
 					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk ", 13,
 							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
 							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+					fflush(stderr);
 				}
 			}
 			if (!adagrad) {
@@ -237,7 +239,7 @@ void *TrainModelThread(void *vid) {
 			}
 		}
 
-		if (feof(fin) || (word_count > lines_per_thread[id])) {
+		if (feof(fin) || (word_count >= lines_per_thread[id])) {
 			word_count_actual += word_count - last_word_count;
 			local_iter--;
 			if (local_iter == 0) break;
@@ -248,6 +250,7 @@ void *TrainModelThread(void *vid) {
 
 		fread(&cr, sizeof(CREC), 1, fin);
 		if (feof(fin)) continue;
+		word_count++;
 
 		word1 = cr.word1 - 1LL; // input word (current word)
 		l1 = word1 * vector_size;
@@ -284,17 +287,34 @@ void *TrainModelThread(void *vid) {
 
 			l2 = target * vector_size;
 			f = 0;
-			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l1];
+			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
 			if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
 			else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
 			else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
 			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+			for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
 		}
 		for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
 
 		// Optimize count error
 	}
+	fclose(fin);
+	free(neu1e);
+	pthread_exit(NULL);
+}
 
+void SaveParameters() {
+	long a, b;
+	FILE *fout;
+	fout = fopen(output_file, "wb");
+	fprintf (fout, "%lld %lld\n", vocab_size, vector_size);
+	for (a = 0; a < vocab_size; a++) {
+		fprintf(fout, "%s ", vocab[a].word);
+		if (binary) for (b = 0; b < vector_size; b++) fwrite(&syn0[a * vector_size + b], sizeof(real), 1, fout);
+		else for (b = 0; b < vector_size; b++) fprintf(fout, "%lf ", syn0[a * vector_size + b]);
+		fprintf(fout, "\n");
+	}
+	free(fout);
 }
 
 void TrainModel() {
@@ -305,8 +325,8 @@ void TrainModel() {
 
 	fprintf(stderr, "Strating training using file %s.\n", train_file);
 	starting_learn_rate = learn_rate;
-	if (vocab_file[0] != 0) ReadVocab(); else {fprint(stderr, "Vocab file is not speicied.\n"); exit(1);}
-	if (output_file[0] == 0) {fprint(stderr, "Output file is not specified.\n"); exit(1);}
+	if (vocab_file[0] != 0) ReadVocab(); else {fprintf(stderr, "Vocab file is not speicied.\n"); exit(1);}
+	if (output_file[0] == 0) {fprintf(stderr, "Output file is not specified.\n"); exit(1);}
 	InitNet();
 	if (negative > 0) InitUnigramTable();
 
@@ -316,32 +336,37 @@ void TrainModel() {
 	file_size = ftello(fin);
 	num_lines = file_size / sizeof(CREC);
 	fclose(fin);
-	fprint(stderr, "Read %lld lines.\n", num_lines);
+	fprintf(stderr, "Read %lld lines.\n", num_lines);
 
 	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
 	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
 	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
+	// cost = malloc(sizeof(real) * num_threads);
 
 	start = clock();
 	for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
 	for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
 
-	cost = malloc(sizeof(real) * num_threads);
-
+	SaveParameters();
 }
 
 int main()
 {
 	int i;
-	//Initialize the vocab with vocab_max_size
+
 	strcpy(vocab_file, "vocab.txt");
+	strcpy(train_file, "cooccurrence.shuf.bin");
+	strcpy(output_file, "combine.out.bin");
+
+	//Initialize the vocab with vocab_max_size
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
-	ReadVocab();
 
 	expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
 	for (i = 0; i < EXP_TABLE_SIZE; i++) {
 		expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
 		expTable[i] = expTable[i] / (expTable[i] + 1);                   // Precompute f(x) = x / (x + 1)
 	}
+
+	TrainModel();
 	return 0;
 }
