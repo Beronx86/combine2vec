@@ -257,61 +257,76 @@ void *TrainModelThread(void *vid) {
 		l1 = word1 * vector_size;
 		word2 = cr.word2 - 1LL; // output word (context word)
 
-		// Optimize predict error
 		for (c = 0; c < vector_size; c++) neu1e[c] = 0;
+		//in hs mode the input&output (current&context) pair are represented in the same vector space
+		if (hs) {
+			// Caulculate predict error
+			for (d = 0; d < vocab[word2].codelen; d++) {
+				f = 0;
+				l2 = vocab[word2].point[d] * vector_size;
 
-		if (hs) for (d = 0; d < vocab[word2].codelen; d++) {
-			f = 0;
-			l2 = vocab[word2].point[d] * vector_size;
+				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
+				if (f <= -MAX_EXP) continue;
+				else if (f >= MAX_EXP) continue;
+				else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
 
-			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
-			if (f <= -MAX_EXP) continue;
-			else if (f >= MAX_EXP) continue;
-			else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
-
-			predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
-			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
-			for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
-		}
-
-		if (negative > 0) for (d = 0; d < negative + 1; d++) {
-			if (d == 0) {
-				target = word2;
-				label = 1;
-			} else {
-				next_random = next_random * (unsigned long long)25214903917 + 11;
-				target = table[(next_random >> 16) % table_size];
-				if (target == 0) target = next_random % (vocab_size - 1) + 1;
-				if (target == word2) continue;
-				label = 0;
+				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
+				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
+				for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
 			}
 
-			l2 = target * vector_size;
-			f = 0;
-			for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
-			if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
-			else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
-			else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
-			for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
-			for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
-		}
-		for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
-
-		// Optimize count error
-		l2 = word2 * vector_size; //no bias version
-		count_grad = 0;
-		for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn0[b + l2]; // current and context word are represented by the same vector space
-		count_grad -= log(cr.val); //no bias version
-		f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
-		cost[id] += 0.5 * f_count_grad * count_grad;
-
-		f_count_grad *= learn_rate;
-		for (c = 0; c < vector_size; c++) {
+			// Calculate count error
+			l2 = word2 * vector_size; //no bias version
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn0[b + l2]; // current and context word are represented by the same vector space
+			count_grad -= log(cr.val); //no bias version
+			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+			f_count_grad *= learn_rate;
 			temp1 = f_count_grad * syn0[c + l2];
 			temp2 = f_count_grad * syn0[c + l1];
-			syn0[b + l1] -= temp1;
-			syn0[b + l2] -= temp2;
+
+			for (c = 0; c < vector_size; c++) syn0[c + l2] -= temp2;
 		}
+
+		// in negative mode the input(current) are represented in the syn0 sapce, output(context) are represented in syn1neg space
+		if (negative > 0) {
+			//calculate the predict error
+			for (d = 0; d < negative + 1; d++) {
+				if (d == 0) {
+					target = word2;
+					label = 1;
+				} else {
+					next_random = next_random * (unsigned long long)25214903917 + 11;
+					target = table[(next_random >> 16) % table_size];
+					if (target == 0) target = next_random % (vocab_size - 1) + 1;
+					if (target == word2) continue;
+					label = 0;
+				}
+
+				l2 = target * vector_size;
+				f = 0;
+				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
+				if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
+				else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
+				else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+				for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
+			}
+			// Calculate count error
+			l2 = word2 * vector_size; //no bias version
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn1neg[b + l2]; // current and context word are represented by the same vector space
+			count_grad -= log(cr.val); //no bias version
+			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+			f_count_grad *= learn_rate;
+			temp1 = f_count_grad * syn1neg[c + l2];
+			temp2 = f_count_grad * syn0[c + l1];
+
+			for (c = 0; c < vector_size; c++) syn1neg[c + l2] -= temp2;
+		}
+		for (c = 0; c < vector_size; c++) syn0[c + l1] += (neu1e[c] - temp1);
+
+		// cost[id] += 0.5 * f_count_grad * count_grad;
 	}
 	fclose(fin);
 	free(neu1e);
