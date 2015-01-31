@@ -30,9 +30,9 @@ typedef struct vocab_word {
 
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
-int num_threads = 1; // pthreads
+int num_threads = 6; // pthreads
 int adagrad = 0;
-int num_iter = 25; // Number of full passes through cooccurrence matrix
+int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
@@ -40,12 +40,13 @@ long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
 real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
-real *syn0, *syn1, *syn1neg, *gradsq, *expTable; //syn0 input word embeding (the i in glove Xij)
+real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
+real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
 real *cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 0, negative = 5;
+int hs = 1, negative = 0;
 const int table_size = 1e8;
 int *table;
 
@@ -85,7 +86,7 @@ void AddWordToVocab(char *word, long long count) {
 		vocab_max_size += 1000;
 		vocab = (VWORD *)realloc(vocab, vocab_max_size * sizeof(VWORD));
 	}
-	vocab_size++; // NOTE that there is a dismatch betwen vocab index and cooccurance word index. according to glove/cooccure.c word id start form 1
+	vocab_size++; // NOTE that there is a mismatch betwen vocab index and cooccurance word index. according to glove/cooccure.c word id start form 1
 }
 
 void ReadVocab() {
@@ -107,68 +108,80 @@ void ReadVocab() {
 }
 
 void CreateBinaryTree() {
-	long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];
-	char code[MAX_CODE_LENGTH];
-	long long *count = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
-	long long *binary = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
-	long long *parent_node = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
-	for (a = 0; a < vocab_size; a++) count[a] = vocab[a].cn;
-	for (a = vocab_size; a < 2 * vocab_size; a++) count[a] = 1e15;
-	pos1 = vocab_size - 1;
-	pos2 = vocab_size;
+  long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];
+  char code[MAX_CODE_LENGTH];
+  long long *count = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+  long long *binary = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+  long long *parent_node = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
+  for (a = 0; a < vocab_size; a++) count[a] = vocab[a].cn;
+  for (a = vocab_size; a < vocab_size * 2; a++) count[a] = 1e15;
+  pos1 = vocab_size - 1;
+  pos2 = vocab_size;
+  // Following algorithm constructs the Huffman tree by adding one node at a time
+  for (a = 0; a < vocab_size - 1; a++) {
+    // First, find two smallest nodes 'min1, min2'
+    if (pos1 >= 0) {
+      if (count[pos1] < count[pos2]) {
+        min1i = pos1;
+        pos1--;
+      } else {
+        min1i = pos2;
+        pos2++;
+      }
+    } else {
+      min1i = pos2;
+      pos2++;
+    }
+    if (pos1 >= 0) {
+      if (count[pos1] < count[pos2]) {
+        min2i = pos1;
+        pos1--;
+      } else {
+        min2i = pos2;
+        pos2++;
+      }
+    } else {
+      min2i = pos2;
+      pos2++;
+    }
+    count[vocab_size + a] = count[min1i] + count[min2i];
+    parent_node[min1i] = vocab_size + a;
+    parent_node[min2i] = vocab_size + a;
+    binary[min2i] = 1;
+  }
+  // Now assign binary code to each vocabulary word
+  for (a = 0; a < vocab_size; a++) {
+    b = a;
+    i = 0;
+    while (1) {
+      code[i] = binary[b];
+      point[i] = b;
+      i++;
+      b = parent_node[b];
+      if (b == vocab_size * 2 - 2) break;
+    }
+    vocab[a].codelen = i;
+    vocab[a].point[0] = vocab_size - 2;
+    for (b = 0; b < i; b++) {
+      vocab[a].code[i - b - 1] = code[b];
+      vocab[a].point[i - b] = point[b] - vocab_size;
+    }
+  }
+  free(count);
+  free(binary);
+  free(parent_node);
+}
 
-	for (a = 0; a < vocab_size - 1; a++) {
-		if (pos1 >= 0) {
-			if (count[pos1] < count[pos2]) {
-				min1i = pos1;
-				pos1--;
-			} else {
-				min1i = pos2;
-				pos2++;
-			}
-		} else {
-			min1i = pos2;
-			pos2++;
-		}
-		if (pos1 >= 0) {
-			if (count[pos1] < count[pos2]) {
-				min2i = pos1;
-				pos1--;
-			} else {
-				min2i = pos2;
-				pos2++;
-			}
-		} else {
-			min2i = pos2;
-			pos2++;
-		}
-
-		count[vocab_size + a] = count[min1i] + count[min2i];
-		parent_node[min1i] = vocab_size + a;
-		parent_node[min2i] = vocab_size + a;
-		binary[min2i] = 1;
-	}
-
+void OutputBinaryTree() {
+	long long a, b;
+	FILE* fout;
+	fout = fopen("binary_tree.txt", "w");
 	for (a = 0; a < vocab_size; a++) {
-		b = a;
-		i = 0;
-		while (1) {
-			code[i] = binary[b];
-			point[i] = b;
-			i++;
-			b = parent_node[b];
-			if (b == vocab_size * 2 - 2) break;
-		}
-		vocab[a].codelen = i;
-		vocab[a].point[0] = vocab_size - 2;
-		for (b = 0; b < i; b++) {
-			vocab[a].code[i - b - 1] = code[b];
-			vocab[a].code[i - b] = point[b] - vocab_size;
-		}
+		fprintf(fout, "%s %d ", vocab[a].word, (int)vocab[a].codelen);
+		for (b = 0; b < vocab[a].codelen; b++) fprintf(fout, "%d", (int)vocab[a].code[b]);
+		fprintf(fout, "\n");
 	}
-	free(count);
-	free(binary);
-	free(parent_node);
+	fclose(fout);
 }
 
 
@@ -183,33 +196,54 @@ void InitNet()
 		if (syn1 == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
 		for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
 			syn1[a * vector_size + b] = 0;
+		if (adagrad) {
+			a = posix_memalign((void **)&syn1_gradsq, 128, (long long)vocab_size * vector_size * sizeof(real));
+			if (syn1_gradsq == NULL) {fprintf(stderr, "Error allocating memory for syn1_gradsq\n"), exit(1);}
+			for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
+				syn1_gradsq[a * vector_size + b] = 1.0;
+		}
 	}
-	if (negative > 0){
+	if (negative > 0) {
 		a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * vector_size * sizeof(real));
 		if (syn1neg == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
 		for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
 			syn1neg[a * vector_size + b] = 0;
+		if (adagrad) {
+			a = posix_memalign((void **)&syn1neg_gradsq, 128, (long long)vocab_size * vector_size *sizeof(real));
+			if (syn1neg_gradsq == NULL) {fprintf(stderr, "Error allocating memory for syn1_gradsq\n"), exit(1);}
+			for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
+				syn1neg_gradsq[a * vector_size + b] = 1.0;
+		}
 	}
 	for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++) {
 		next_random = next_random * (unsigned long long)25214903917 + 11;
 		syn0[a * vector_size + b] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / vector_size;
 	}
+	if (adagrad) {
+		a = posix_memalign((void **)&syn0_gradsq, 128, (long long)vocab_size * vector_size * sizeof(real));
+		if (syn0_gradsq == NULL) {fprintf(stderr, "Error allocating memory for syn0_gradsq\n"), exit(1);}
+		for (a = 0; a < vocab_size; a++) for(b = 0; b < vector_size; b++)
+			syn0_gradsq[a * vector_size + b] = 1.0;
+	}
 	CreateBinaryTree();
+	// OutputBinaryTree();
+	// SaveParameters();
 }
 
 
 void *TrainModelThread(void *vid) {
-	long long a, b, c, d;
+	long long c, d;
 	long long l1, l2, word1, word2, target, label;
 	long long local_iter = num_iter, word_count = 0, last_word_count = 0;
 	long long id = (long long) vid;
-	unsigned long long next_random = (long long) id;
+	unsigned long long next_random = id;
 	real f, predict_grad, count_grad, f_count_grad;
-	real temp1, temp2;
+	real temp;
 	real *neu1e = (real *)calloc(vector_size, sizeof(real));
+	real *neu1e_output = (real *)calloc(vector_size, sizeof(real)); // when using adagrad, neu1e is the error for output (context) word
 	CREC cr;
-	FILE *fin;
 	clock_t now;
+	FILE *fin;
 	fin = fopen(train_file, "rb");
 	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
 	cost[id] = 0;
@@ -258,9 +292,10 @@ void *TrainModelThread(void *vid) {
 		word2 = cr.word2 - 1LL; // output word (context word)
 
 		for (c = 0; c < vector_size; c++) neu1e[c] = 0;
-		//in hs mode the input&output (current&context) pair are represented in the same vector space
+		for (c = 0; c < vector_size; c++) neu1e_output[c] = 0;
+		// hs mode, input&output (current&context) word are in the same vector space
 		if (hs) {
-			// Caulculate predict error
+			// Compute preidcit error
 			for (d = 0; d < vocab[word2].codelen; d++) {
 				f = 0;
 				l2 = vocab[word2].point[d] * vector_size;
@@ -268,29 +303,51 @@ void *TrainModelThread(void *vid) {
 				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
 				if (f <= -MAX_EXP) continue;
 				else if (f >= MAX_EXP) continue;
-				else f = expTable[(int)(f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2)];
+				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
 
 				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
-				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
-				for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
+				if (!adagrad) {
+					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
+					for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
+				} else {
+					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
+					for (c = 0; c < vector_size; c++) {
+						temp = predict_grad * syn0[c + l1];
+						syn1[c + l2] += temp / sqrt(syn1_gradsq[c + l2]);
+						syn1_gradsq[c + l2] += temp * temp;
+					}
+				}
 			}
 
-			// Calculate count error
-			l2 = word2 * vector_size; //no bias version
+			// Compute count error
+			l2 = word2 * vector_size;
 			count_grad = 0;
-			for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn0[b + l2]; // current and context word are represented by the same vector space
-			count_grad -= log(cr.val); //no bias version
+			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] + syn0[c + l2];
+			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+
 			f_count_grad *= learn_rate;
-			temp1 = f_count_grad * syn0[c + l2];
-			temp2 = f_count_grad * syn0[c + l1];
+			for (c = 0; c < vector_size; c++) {
+				neu1e[c] -= f_count_grad * syn0[c + l2];
+				neu1e_output[c] -=  f_count_grad * syn0[c + l1];
+			}
 
-			for (c = 0; c < vector_size; c++) syn0[c + l2] -= temp2;
+			if (l1 == l2) { // if word1 and word2 are the same
+				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
+			} else {
+				if (!adagrad) {
+					for (c = 0; c < vector_size; c++) syn0[c + l2] += neu1e_output[c];
+				} else {
+					for (c = 0; c < vector_size; c++) {
+						syn0[c + l2] += neu1e_output[c] / sqrt(syn0_gradsq[c + l2]);
+						syn0_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
+					}
+				}
+			}
 		}
-
-		// in negative mode the input(current) are represented in the syn0 sapce, output(context) are represented in syn1neg space
+		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
-			//calculate the predict error
+			// Compute predict error
 			for (d = 0; d < negative + 1; d++) {
 				if (d == 0) {
 					target = word2;
@@ -306,26 +363,63 @@ void *TrainModelThread(void *vid) {
 				l2 = target * vector_size;
 				f = 0;
 				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
+				if (d == 0) count_grad = f; // elementwise multiplication is the same for count and predict
 				if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
 				else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
 				else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
-				for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
-				for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
+				if (d == 0) { // target word has two gradient source, count and predict.
+					for (c = 0; c < vector_size; c++) neu1e_output[c] += predict_grad * syn0[c + l1];
+				} else {
+					if (!adagrad) {
+						for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+						for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
+					} else {
+						for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
+						for (c = 0; c < vector_size; c++) {
+							temp = predict_grad * syn0[c + l1];
+							syn1neg[c + l2] += temp / sqrt(syn1neg_gradsq[c + l2]);
+							syn1neg[c + l2] += temp * temp;
+						}
+					}
+				}
 			}
-			// Calculate count error
-			l2 = word2 * vector_size; //no bias version
-			count_grad = 0;
-			for (c = 0; c < vector_size; c++) count_grad += syn0[b + l1] * syn1neg[b + l2]; // current and context word are represented by the same vector space
-			count_grad -= log(cr.val); //no bias version
+
+			// Compute count error
+			l2 = word2 * vector_size;
+			// count_grad = 0;
+			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
+			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+
 			f_count_grad *= learn_rate;
-			temp1 = f_count_grad * syn1neg[c + l2];
-			temp2 = f_count_grad * syn0[c + l1];
+			for (c = 0; c < vector_size; c++) {
+				neu1e[c] -= f_count_grad * syn1neg[c  +l2];
+				neu1e_output[c] -= f_count_grad * syn0[c + l2];
+			}
 
-			for (c = 0; c < vector_size; c++) syn1neg[c + l2] -= temp2;
+			if (l1 == l2) {
+				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
+			} else {
+				if (!adagrad) {
+					for (c = 0; c < vector_size; c++) syn1neg[c + l2] += neu1e_output[c];
+				} else {
+					for (c = 0; c < vector_size; c++) {
+						syn1neg[c + l2] += neu1e_output[c] / sqrt(syn1neg_gradsq[c + l2]);
+						syn1neg_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
+					}
+				}
+			}
 		}
-		for (c = 0; c < vector_size; c++) syn0[c + l1] += (neu1e[c] - temp1);
 
+		if (!adagrad) {
+			for (c = 0; c < vector_size; c++) syn0[c + l1] += neu1e[c];
+		}
+		else {
+			for (c = 0; c < vector_size; c++) {
+				syn0[c + l1] += neu1e[c] / sqrt(syn0_gradsq[c + l1]);
+				syn0_gradsq[c + l1] += neu1e[c] * neu1e[c];
+			}
+		}
 		// cost[id] += 0.5 * f_count_grad * count_grad;
 	}
 	fclose(fin);
@@ -349,8 +443,8 @@ void SaveParameters() {
 
 void TrainModel() {
 	long long file_size;
-	long long a, b, c, d;
-	FILE *fin, *fo;
+	long long a;
+	FILE *fin;
 	pthread_t *pt = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
 
 	fprintf(stderr, "Strating training using file %s.\n", train_file);
@@ -386,7 +480,7 @@ int main()
 
 	strcpy(vocab_file, "vocab.txt");
 	strcpy(train_file, "cooccurrence.shuf.bin");
-	strcpy(output_file, "combine.out.bin");
+	strcpy(output_file, "combine2.hs.noada.iter5.bin");
 
 	//Initialize the vocab with vocab_max_size
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
