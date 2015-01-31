@@ -33,8 +33,8 @@ int enable_count = 1;
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
 int num_threads = 6; // pthreads
-int adagrad = 1;
-int num_iter = 20; // Number of full passes through cooccurrence matrix
+int adagrad = 0;
+int num_iter = 30; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
@@ -442,7 +442,7 @@ int main()
 
 	strcpy(vocab_file, "vocab.txt");
 	strcpy(train_file, "cooccurrence.shuf.bin");
-	strcpy(output_file, "combine.count.ada.bin");
+	strcpy(output_file, "combine.count.noada.iter30.bin");
 
 	//Initialize the vocab with vocab_max_size
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
