@@ -30,15 +30,15 @@ typedef struct vocab_word {
 
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
-int num_threads = 6; // pthreads
-int adagrad = 0;
+int num_threads = 1; // pthreads
+int adagrad = 1;
 int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
+real learn_rate = 0.01, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
@@ -46,7 +46,7 @@ real *cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 1, negative = 0;
+int hs = 0, negative = 5;
 const int table_size = 1e8;
 int *table;
 
@@ -378,7 +378,7 @@ void *TrainModelThread(void *vid) {
 						for (c = 0; c < vector_size; c++) {
 							temp = predict_grad * syn0[c + l1];
 							syn1neg[c + l2] += temp / sqrt(syn1neg_gradsq[c + l2]);
-							syn1neg[c + l2] += temp * temp;
+							syn1neg_gradsq[c + l2] += temp * temp;
 						}
 					}
 				}
@@ -480,7 +480,7 @@ int main()
 
 	strcpy(vocab_file, "vocab.txt");
 	strcpy(train_file, "cooccurrence.shuf.bin");
-	strcpy(output_file, "combine2.hs.noada.iter5.bin");
+	strcpy(output_file, "combine2.neg.noada.iter5.bin");
 
 	//Initialize the vocab with vocab_max_size
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
