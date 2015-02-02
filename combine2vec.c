@@ -28,13 +28,13 @@ typedef struct vocab_word {
 	char *word, *code, codelen;
 } VWORD;
 
-int enable_predict = 0;
+int enable_predict = 1;
 int enable_count = 1;
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
-int num_threads = 6; // pthreads
+int num_threads = 1; // pthreads
 int adagrad = 0;
-int num_iter = 30; // Number of full passes through cooccurrence matrix
+int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
@@ -44,11 +44,11 @@ real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
-real *cost;
+real *predict_cost, *count_cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 1, negative = 0;
+int hs = 0, negative = 5;
 const int table_size = 1e8;
 int *table;
 
@@ -247,9 +247,9 @@ void *TrainModelThread(void *vid) {
 	FILE *fin;
 	fin = fopen(train_file, "rb");
 	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
-	cost[id] = 0;
+	predict_cost[id] = 0;
+	count_cost[id] = 0;
 
-	// for (a = 0; a < lines_per_thread[id]; a++) {
 	while(1){
 		if (word_count - last_word_count > 10000) {
 			word_count_actual += word_count - last_word_count;
@@ -258,14 +258,20 @@ void *TrainModelThread(void *vid) {
 				now = clock();
 				if (!adagrad)
 				{
-					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk ", 13,
+					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk \n"
+							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							learn_rate, word_count_actual / (real)(num_iter * num_lines + 1) * 100,
-							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
+							predict_cost[id] / word_count, count_cost[id] / word_count,
+							(predict_cost[id] + count_cost[id]) / word_count);
 					fflush(stderr);
 				} else {
-					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk ", 13,
+					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk Cost/word: %.5f  ",
+							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
-							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
+							predict_cost[id] / word_count, count_cost[id] / word_count,
+							(predict_cost[id] + count_cost[id]) / word_count);
 					fflush(stderr);
 				}
 			}
@@ -281,6 +287,8 @@ void *TrainModelThread(void *vid) {
 			if (local_iter == 0) break;
 			word_count = 0;
 			last_word_count = 0;
+			predict_cost[id] = 0;
+			count_cost[id] = 0;
 			fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
 		}
 
@@ -304,6 +312,8 @@ void *TrainModelThread(void *vid) {
 				if (f <= -MAX_EXP) continue;
 				else if (f >= MAX_EXP) continue;
 				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
+
+				predict_cost[id] -= (1 - vocab[word2].code[d]) * log(f) + vocab[word2].code[d] * log(1 - f);
 
 				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
 				if (!adagrad) {
@@ -334,9 +344,16 @@ void *TrainModelThread(void *vid) {
 				l2 = target * vector_size;
 				f = 0;
 				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
-				if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
-				else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
-				else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				// if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
+				// else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
+				// else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				if (f > MAX_EXP) f = 1;
+				else if (f < -MAX_EXP) f = 0;
+				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
+
+				if (f != 1 && f != 0) predict_cost[id] -= label * log(f) + (1 - label) * log(1 - f);
+
+				predict_grad = (label - f) * learn_rate;
 				if (!adagrad) {
 					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
 					for (c = 0; c < vector_size; c++) syn1neg[c + l2] += predict_grad * syn0[c + l1];
@@ -365,6 +382,8 @@ void *TrainModelThread(void *vid) {
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2]; // current and context word are represented by the same vector space
 			count_grad -= log(cr.val); //no bias version
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+
+			count_cost[id] += 0.5 * f_count_grad * count_grad;
 
 			f_count_grad *= learn_rate;
 			for (c = 0; c < vector_size; c++) {
@@ -406,6 +425,7 @@ void SaveParameters() {
 void TrainModel() {
 	long long file_size;
 	long long a;
+	real avg_cost;
 	FILE *fin;
 	pthread_t *pt = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
 
@@ -427,11 +447,14 @@ void TrainModel() {
 	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
 	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
 	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
-	cost = malloc(sizeof(real) * num_threads);
+	predict_cost = malloc(sizeof(real) * num_threads);
+	count_cost = malloc(sizeof(real) * num_threads);
 
 	start = clock();
 	for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
 	for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+	for (a = 0; a < num_threads; a++) avg_cost += (predict_cost[a] + count_cost[a]);
+	fprintf(stderr, "\nTotal average cost/word: %.5f  ", avg_cost / num_lines);
 
 	SaveParameters();
 }
@@ -442,7 +465,7 @@ int main()
 
 	strcpy(vocab_file, "vocab.txt");
 	strcpy(train_file, "cooccurrence.shuf.bin");
-	strcpy(output_file, "combine.count.noada.iter30.bin");
+	strcpy(output_file, "combine.test_cost.bin");
 
 	//Initialize the vocab with vocab_max_size
 	vocab = (VWORD *)calloc(vocab_max_size, sizeof(VWORD));
