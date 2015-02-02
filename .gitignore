@@ -13,3 +13,6 @@
 /combine.neg.noshuf.bin
 /combine.neg.shuf.bin
 /combine.count.ada.bin
+/combine.count.nodaa.iter30.bin
+/combine.test_cost.bin
+/combine2.neg.noada.iter5.bin
