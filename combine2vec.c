@@ -256,8 +256,7 @@ void *TrainModelThread(void *vid) {
 			last_word_count = word_count;
 			if (verbose > 1) {
 				now = clock();
-				if (!adagrad)
-				{
+				if (!adagrad) {
 					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk \n"
 							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							learn_rate, word_count_actual / (real)(num_iter * num_lines + 1) * 100,
@@ -266,7 +265,7 @@ void *TrainModelThread(void *vid) {
 							(predict_cost[id] + count_cost[id]) / word_count);
 					fflush(stderr);
 				} else {
-					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk Cost/word: %.5f  ",
+					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk Cost/word: %.5f  \n"
 							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
 							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
