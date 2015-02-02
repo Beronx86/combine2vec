@@ -31,22 +31,22 @@ typedef struct vocab_word {
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
 int num_threads = 1; // pthreads
-int adagrad = 1;
+int adagrad = 0;
 int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.01, starting_learn_rate; // Initial learning rate
+real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
-real *cost;
+real *predict_cost, *count_cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 0, negative = 5;
+int hs = 1, negative = 0;
 const int table_size = 1e8;
 int *table;
 
@@ -246,7 +246,8 @@ void *TrainModelThread(void *vid) {
 	FILE *fin;
 	fin = fopen(train_file, "rb");
 	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
-	cost[id] = 0;
+	predict_cost[id] = 0;
+	count_cost[id] = 0;
 
 	// for (a = 0; a < lines_per_thread[id]; a++) {
 	while(1){
@@ -255,16 +256,21 @@ void *TrainModelThread(void *vid) {
 			last_word_count = word_count;
 			if (verbose > 1) {
 				now = clock();
-				if (!adagrad)
-				{
-					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk ", 13,
+				if (!adagrad) {
+					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk \n"
+							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							learn_rate, word_count_actual / (real)(num_iter * num_lines + 1) * 100,
-							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
+							predict_cost[id] / word_count, count_cost[id] / word_count,
+							(predict_cost[id] + count_cost[id]) / word_count);
 					fflush(stderr);
 				} else {
-					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk ", 13,
+					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk  \n"
+							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
 							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
-							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
+							predict_cost[id] / word_count, count_cost[id] / word_count,
+							(predict_cost[id] + count_cost[id]) / word_count);
 					fflush(stderr);
 				}
 			}
@@ -280,6 +286,8 @@ void *TrainModelThread(void *vid) {
 			if (local_iter == 0) break;
 			word_count = 0;
 			last_word_count = 0;
+			predict_cost[id] = 0;
+			count_cost[id] = 0;
 			fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
 		}
 
@@ -305,6 +313,8 @@ void *TrainModelThread(void *vid) {
 				else if (f >= MAX_EXP) continue;
 				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
 
+				predict_cost[id] -= (1 - vocab[word2].code[d]) * log(f) + vocab[word2].code[d] * log(1 - f);
+
 				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
 				if (!adagrad) {
 					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
@@ -320,16 +330,19 @@ void *TrainModelThread(void *vid) {
 			}
 
 			// Compute count error
+			/*
 			l2 = word2 * vector_size;
 			count_grad = 0;
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] + syn0[c + l2];
 			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
 
+			count_cost[id] += 0.5 * f_count_grad * count_grad;
+
 			f_count_grad *= learn_rate;
 			for (c = 0; c < vector_size; c++) {
 				neu1e[c] -= f_count_grad * syn0[c + l2];
-				neu1e_output[c] -=  f_count_grad * syn0[c + l1];
+				neu1e_output[c] -= f_count_grad * syn0[c + l1];
 			}
 
 			if (l1 == l2) { // if word1 and word2 are the same
@@ -344,6 +357,7 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+			*/
 		}
 		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
@@ -364,9 +378,16 @@ void *TrainModelThread(void *vid) {
 				f = 0;
 				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
 				if (d == 0) count_grad = f; // elementwise multiplication is the same for count and predict
-				if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
-				else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
-				else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				// if (f > MAX_EXP) predict_grad = (label - 1) * learn_rate;
+				// else if (f < -MAX_EXP) predict_grad = (label - 0) * learn_rate;
+				// else predict_grad = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * learn_rate;
+				if (f > MAX_EXP) f = 1;
+				else if (f < -MAX_EXP) f = 0;
+				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
+
+				if (f != 1 && f != 0) predict_cost[id] -= label * log(f) + (1 - label) * log(1 - f);
+
+				predict_grad = (label - f) * learn_rate;
 				if (d == 0) { // target word has two gradient source, count and predict.
 					for (c = 0; c < vector_size; c++) neu1e_output[c] += predict_grad * syn0[c + l1];
 				} else {
@@ -385,11 +406,14 @@ void *TrainModelThread(void *vid) {
 			}
 
 			// Compute count error
+			/*
 			l2 = word2 * vector_size;
 			// count_grad = 0;
 			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
 			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+
+			count_cost[id] += 0.5 * f_count_grad * count_grad;
 
 			f_count_grad *= learn_rate;
 			for (c = 0; c < vector_size; c++) {
@@ -409,6 +433,7 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+			*/
 		}
 
 		if (!adagrad) {
@@ -420,7 +445,6 @@ void *TrainModelThread(void *vid) {
 				syn0_gradsq[c + l1] += neu1e[c] * neu1e[c];
 			}
 		}
-		// cost[id] += 0.5 * f_count_grad * count_grad;
 	}
 	fclose(fin);
 	free(neu1e);
@@ -465,7 +489,8 @@ void TrainModel() {
 	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
 	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
 	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
-	cost = malloc(sizeof(real) * num_threads);
+	predict_cost = malloc(sizeof(real) * num_threads);
+	count_cost = malloc(sizeof(real) * num_threads);
 
 	start = clock();
 	for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
