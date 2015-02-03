@@ -38,7 +38,7 @@ int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
+real learn_rate = 0.01, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
@@ -46,7 +46,7 @@ real *predict_cost, *count_cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 1, negative = 0;
+int hs = 0, negative = 5;
 const int table_size = 1e8;
 int *table;
 
@@ -304,6 +304,7 @@ void *TrainModelThread(void *vid) {
 		// hs mode, input&output (current&context) word are in the same vector space
 		if (hs) {
 			// Compute preidcit error
+			/*
 			for (d = 0; d < vocab[word2].codelen; d++) {
 				f = 0;
 				l2 = vocab[word2].point[d] * vector_size;
@@ -328,9 +329,9 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+			*/
 
 			// Compute count error
-			/*
 			l2 = word2 * vector_size;
 			count_grad = 0;
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] + syn0[c + l2];
@@ -357,11 +358,11 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-			*/
 		}
 		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
 			// Compute predict error
+			/*
 			for (d = 0; d < negative + 1; d++) {
 				if (d == 0) {
 					target = word2;
@@ -404,12 +405,12 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+			*/
 
 			// Compute count error
-			/*
 			l2 = word2 * vector_size;
-			// count_grad = 0;
-			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
 			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
 
@@ -433,7 +434,6 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-			*/
 		}
 
 		if (!adagrad) {
