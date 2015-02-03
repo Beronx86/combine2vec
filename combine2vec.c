@@ -334,7 +334,7 @@ void *TrainModelThread(void *vid) {
 			// Compute count error
 			l2 = word2 * vector_size;
 			count_grad = 0;
-			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] + syn0[c + l2];
+			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2];
 			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
 
