@@ -38,7 +38,7 @@ int vector_size = 100; // Word vector size
 long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0;
 char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.01, starting_learn_rate; // Initial learning rate
+real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
@@ -46,7 +46,7 @@ real *predict_cost, *count_cost;
 VWORD *vocab;
 clock_t start;
 
-int hs = 0, negative = 5;
+int hs = 1, negative = 0;
 const int table_size = 1e8;
 int *table;
 
@@ -419,7 +419,7 @@ void *TrainModelThread(void *vid) {
 			f_count_grad *= learn_rate;
 			for (c = 0; c < vector_size; c++) {
 				neu1e[c] -= f_count_grad * syn1neg[c  +l2];
-				neu1e_output[c] -= f_count_grad * syn0[c + l2];
+				neu1e_output[c] -= f_count_grad * syn0[c + l1];
 			}
 
 			if (l1 == l2) {
