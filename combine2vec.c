@@ -10,9 +10,12 @@
 
 #define _FILE_OFFSET_BITS 64
 #define MAX_STRING_LENGTH 100
+#define MAX_SENTENCE_LENGTH 1000
 #define MAX_CODE_LENGTH 40
 #define MAX_EXP 6
 #define EXP_TABLE_SIZE 1000
+
+const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
 typedef double real;
 
@@ -28,6 +31,11 @@ typedef struct vocab_word {
 	char *word, *code, codelen;
 } VWORD;
 
+typedef struct bi_word{
+	char *biword;
+	real count;
+} BIWORD;
+
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
 int num_threads = 1; // pthreads
@@ -35,15 +43,18 @@ int adagrad = 0;
 int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
-long long num_lines = 0, *lines_per_thread, vocab_size = 0, vocab_max_size = 2500;
-long long word_count_actual = 0;
-char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH];
-real learn_rate = 0.025, starting_learn_rate; // Initial learning rate
+int *vocab_hash;
+long long num_lines = 0, train_file_size = 0, vocab_size = 0, vocab_max_size = 2500;
+long long word_count_actual = 0, train_words = 0;;
+long long bigram_hash_size;
+char vocab_file[MAX_STRING_LENGTH], train_file[MAX_STRING_LENGTH], output_file[MAX_STRING_LENGTH], cooccur_file[MAX_STRING_LENGTH];
+real learn_rate = 0.025, starting_learn_rate, sample = 1e-3; // Initial learning rate
 real alpha = 0.75, x_max = 100.0; // Weighting function parameters, not extremely sensitive to corpus, though may need adjustment for very small or very large corpora
 real *syn0, *syn1, *syn1neg, *expTable; //syn0 input word embeding (the i in glove Xij)
 real *syn0_gradsq, *syn1_gradsq, *syn1neg_gradsq;
 real *predict_cost, *count_cost;
 VWORD *vocab;
+BIWORD **bigram_table;
 clock_t start;
 
 int hs = 1, negative = 0;
@@ -56,6 +67,115 @@ int scmp( char *s1, char *s2 ) {
     return(*s1 - *s2);
 }
 
+
+/*************************Constract a bigram table******************************/
+char *ConcatenateWord(char* word1, char* word2) {
+	char *biword;
+	biword = (char *)calloc(strlen(word1) + strlen(word2) + 2, sizeof(char));
+	strcpy(biword, word1);
+	strcat(biword, "#");
+	strcat(biword, word2);
+	return biword;
+}
+
+long long GetWordHash(char *word, long long hash_size) {
+	unsigned long long a, hash = 0;
+	for (a = 0; a < strlen(word); a++) hash = hash * 257 + word[a];
+	hash = hash % hash_size;
+	return hash;
+}
+
+void SaveCREC(CREC *cr) {
+	char *biword, *word1, *word2;
+	unsigned long long hash;
+	word1 = vocab[cr->word1 - 1LL].word;
+	word2 = vocab[cr->word2 - 1LL].word;
+	biword = ConcatenateWord(word1, word2);
+	hash = GetWordHash(biword, bigram_hash_size);
+	while (bigram_table[hash] != NULL) hash = (hash + 1) % bigram_hash_size;
+	bigram_table[hash] = (BIWORD *)malloc(sizeof(BIWORD));
+	bigram_table[hash]->biword = biword;
+	bigram_table[hash]->count = cr->val;
+}
+
+real GetCount(char *biword) {
+	unsigned long long hash = GetWordHash(biword, bigram_hash_size);
+	while (1) {
+		if (bigram_table[hash] == NULL) return 0.0;
+		if (!strcmp(biword, bigram_table[hash]->biword)) return bigram_table[hash]->count;
+		hash = (hash + 1) % bigram_hash_size;
+	}
+	return 0.0;
+}
+
+void ConstructBigramTable() {
+	FILE *fin;
+	CREC cr;
+	long long a, n = 0, file_size;
+
+	fin = fopen(train_file, "rb");
+	if (fin == NULL) {fprintf(stderr, "Unable to open coocurrence file %s.\n", train_file); exit(1);}
+	fseek(fin, 0, SEEK_END);
+	file_size = ftello(fin);
+	num_lines = file_size / sizeof(CREC);
+
+	bigram_hash_size = (long long)num_lines / 0.7;
+	bigram_table = (BIWORD **)malloc(bigram_hash_size * sizeof(BIWORD *));
+	for (a = 0; a < bigram_hash_size; a++) bigram_table[a] = (BIWORD *)NULL;
+
+	fprintf(stderr, "reading bigram file %s into memory\n", cooccur_file);
+	fseek(fin, 0, SEEK_SET);
+	while (1) {
+		n++;
+		if (n % 1000000 == 0) fprintf(stderr, "%.2lf%% read into the memory\n", (n / (real)num_lines * 100));
+		fread(&cr, sizeof(CREC), 1, fin);
+		if (feof(fin)) break;
+		SaveCREC(&cr);
+	}
+	fclose(fin);
+}
+/************************************************************************************/
+// Reads a single word from a file, assuming space + tab + EOL to be word boundaries
+void ReadWord(char *word, FILE *fin) {
+  int a = 0, ch;
+  while (!feof(fin)) {
+    ch = fgetc(fin);
+    if (ch == 13) continue;
+    if ((ch == ' ') || (ch == '\t') || (ch == '\n')) {
+      if (a > 0) {
+        if (ch == '\n') ungetc(ch, fin);
+        break;
+      }
+      if (ch == '\n') {
+        strcpy(word, (char *)"</s>");
+        return;
+      } else continue;
+    }
+    word[a] = ch;
+    a++;
+    if (a >= MAX_STRING_LENGTH - 1) a--;   // Truncate too long words
+  }
+  word[a] = 0;
+}
+
+// Returns position of a word in the vocabulary; if the word is not found, returns -1
+int SearchVocab(char *word) {
+  unsigned int hash = GetWordHash(word);
+  while (1) {
+    if (vocab_hash[hash] == -1) return -1;
+    if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];
+    hash = (hash + 1) % vocab_hash_size;
+  }
+  return -1;
+}
+
+// Reads a word and returns its index in the vocabulary
+int ReadWordIndex(FILE *fin) {
+  char word[MAX_STRING_LENGTH];
+  ReadWord(word, fin);
+  if (feof(fin)) return -1;
+  return SearchVocab(word);
+}
 
 void InitUnigramTable() {
   int a, i;
@@ -81,6 +201,7 @@ void AddWordToVocab(char *word, long long count) {
 	vocab[vocab_size].word = (char *)calloc(length, sizeof(char));
 	strcpy(vocab[vocab_size].word, word);
 	vocab[vocab_size].cn = count;
+	train_words += count;
 
 	if (vocab_size + 2 >= vocab_max_size) {
 		vocab_max_size += 1000;
@@ -89,6 +210,7 @@ void AddWordToVocab(char *word, long long count) {
 	vocab_size++; // NOTE that there is a mismatch betwen vocab index and cooccurance word index. according to glove/cooccure.c word id start form 1
 }
 
+
 void ReadVocab() {
 	long long count, a;
 	char word[MAX_STRING_LENGTH], format[20];
@@ -96,6 +218,9 @@ void ReadVocab() {
 	fid = fopen(vocab_file, "r");
 	if (fid == NULL) {fprintf(stderr, "Unable to open vocab file %s.\n", vocab_file); exit(1);}
 	sprintf(format, "%%%ds %%lld", MAX_STRING_LENGTH);
+
+	vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
+
 	while (fscanf(fid, format, word, &count) != EOF) {
 		AddWordToVocab(word, count);
 	}
@@ -232,10 +357,12 @@ void InitNet()
 
 
 void *TrainModelThread(void *vid) {
-	long long c, d;
-	long long l1, l2, word1, word2, target, label;
+	long long a, b, c, d;
+	long long l1, l2, word, last_word, sentence_length = 0, sentence_position = 0;
+	long long target, label, sen[MAX_SENTENCE_LENGTH + 1];
 	long long local_iter = num_iter, word_count = 0, last_word_count = 0;
 	long long id = (long long) vid;
+	long long temp_word;
 	unsigned long long next_random = id;
 	real f, predict_grad, count_grad, f_count_grad;
 	real temp;
@@ -245,11 +372,10 @@ void *TrainModelThread(void *vid) {
 	clock_t now;
 	FILE *fin;
 	fin = fopen(train_file, "rb");
-	fseeko(fin, (num_lines / num_threads * id) * sizeof(CREC), SEEK_SET);
+	fseek(fin, train_file_size / (long long)num_threads * (long long)id, SEEK_SET);
 	predict_cost[id] = 0;
 	count_cost[id] = 0;
 
-	// for (a = 0; a < lines_per_thread[id]; a++) {
 	while(1){
 		if (word_count - last_word_count > 10000) {
 			word_count_actual += word_count - last_word_count;
@@ -259,7 +385,7 @@ void *TrainModelThread(void *vid) {
 				if (!adagrad) {
 					fprintf(stderr, "%cLearning Rate: %f Progess: %.2f%% Words/thread/sec: %.2fk \n"
 							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
-							learn_rate, word_count_actual / (real)(num_iter * num_lines + 1) * 100,
+							learn_rate, word_count_actual / (real)(num_iter * train_words + 1) * 100,
 							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
 							predict_cost[id] / word_count, count_cost[id] / word_count,
 							(predict_cost[id] + count_cost[id]) / word_count);
@@ -267,7 +393,7 @@ void *TrainModelThread(void *vid) {
 				} else {
 					fprintf(stderr, "%cProgess: %.2f%% Words/thread/sec: %.2fk  \n"
 							"Predict cost/word: %.5f  Count cost/word: %.5f  Cost/word: %.5f  ", 13,
-							word_count_actual / (real)(num_iter * num_lines + 1) * 100,
+							word_count_actual / (real)(num_iter * train_words + 1) * 100,
 							word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000),
 							predict_cost[id] / word_count, count_cost[id] / word_count,
 							(predict_cost[id] + count_cost[id]) / word_count);
@@ -275,11 +401,30 @@ void *TrainModelThread(void *vid) {
 				}
 			}
 			if (!adagrad) {
-				learn_rate = starting_learn_rate * (1 - word_count_actual / (real)(num_iter * num_lines + 1));
+				learn_rate = starting_learn_rate * (1 - word_count_actual / (real)(num_iter * train_words + 1));
 				if (learn_rate < starting_learn_rate * 0.0001) learn_rate = starting_learn_rate * 0.0001;
 			}
 		}
 
+		if (sentence_length == 0) {
+		while (1) {
+				word = ReadWordIndex(fin);
+				if (feof(fin)) break;
+				if (word == -1) continue;
+				word_count++;
+				if (word == 0) break;
+				// The subsampling randomly discards frequent words while keeping the ranking same
+				if (sample > 0) {
+					real ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
+					next_random = next_random * (unsigned long long)25214903917 + 11;
+					if (ran < (next_random & 0xFFFF) / (real)65536) continue;
+				}
+				sen[sentence_length] = word;
+				sentence_length++;
+				if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+			}
+			sentence_position = 0;
+		}
 		if (feof(fin) || (word_count >= lines_per_thread[id])) {
 			word_count_actual += word_count - last_word_count;
 			local_iter--;
@@ -295,27 +440,27 @@ void *TrainModelThread(void *vid) {
 		if (feof(fin)) continue;
 		word_count++;
 
-		word1 = cr.word1 - 1LL; // input word (current word)
-		l1 = word1 * vector_size;
-		word2 = cr.word2 - 1LL; // output word (context word)
+		word = cr.word1 - 1LL; // input word (current word)
+		l1 = word * vector_size;
+		last_word = cr.word2 - 1LL; // output word (context word)
 
 		for (c = 0; c < vector_size; c++) neu1e[c] = 0;
 		for (c = 0; c < vector_size; c++) neu1e_output[c] = 0;
 		// hs mode, input&output (current&context) word are in the same vector space
 		if (hs) {
 			// Compute preidcit error
-			for (d = 0; d < vocab[word2].codelen; d++) {
+			for (d = 0; d < vocab[last_word].codelen; d++) {
 				f = 0;
-				l2 = vocab[word2].point[d] * vector_size;
+				l2 = vocab[last_word].point[d] * vector_size;
 
 				for (c = 0; c < vector_size; c++) f += syn0[c + l1] * syn1[c + l2];
 				if (f <= -MAX_EXP) continue;
 				else if (f >= MAX_EXP) continue;
 				else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
 
-				predict_cost[id] -= (1 - vocab[word2].code[d]) * log(f) + vocab[word2].code[d] * log(1 - f);
+				predict_cost[id] -= (1 - vocab[last_word].code[d]) * log(f) + vocab[last_word].code[d] * log(1 - f);
 
-				predict_grad = (1 - vocab[word2].code[d] - f) * learn_rate;
+				predict_grad = (1 - vocab[last_word].code[d] - f) * learn_rate;
 				if (!adagrad) {
 					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1[c + l2];
 					for (c = 0; c < vector_size; c++) syn1[c + l2] += predict_grad * syn0[c + l1];
@@ -330,8 +475,7 @@ void *TrainModelThread(void *vid) {
 			}
 
 			// Compute count error
-			/*
-			l2 = word2 * vector_size;
+			l2 = last_word * vector_size;
 			count_grad = 0;
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2];
 			count_grad -= log(cr.val);
@@ -345,7 +489,7 @@ void *TrainModelThread(void *vid) {
 				neu1e_output[c] -= f_count_grad * syn0[c + l1];
 			}
 
-			if (l1 == l2) { // if word1 and word2 are the same
+			if (l1 == l2) { // if word1 and last_word are the same
 				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
 			} else {
 				if (!adagrad) {
@@ -357,20 +501,19 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-			*/
 		}
 		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
 			// Compute predict error
 			for (d = 0; d < negative + 1; d++) {
 				if (d == 0) {
-					target = word2;
+					target = last_word;
 					label = 1;
 				} else {
 					next_random = next_random * (unsigned long long)25214903917 + 11;
 					target = table[(next_random >> 16) % table_size];
 					if (target == 0) target = next_random % (vocab_size - 1) + 1;
-					if (target == word2) continue;
+					if (target == last_word) continue;
 					label = 0;
 				}
 
@@ -406,7 +549,7 @@ void *TrainModelThread(void *vid) {
 			}
 
 			// Compute count error
-			l2 = word2 * vector_size;
+			l2 = last_word * vector_size;
 			// count_grad = 0;
 			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
 			count_grad -= log(cr.val);
@@ -464,7 +607,6 @@ void SaveParameters() {
 }
 
 void TrainModel() {
-	long long file_size;
 	long long a;
 	FILE *fin;
 	pthread_t *pt = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
@@ -473,20 +615,16 @@ void TrainModel() {
 	starting_learn_rate = learn_rate;
 	if (vocab_file[0] != 0) ReadVocab(); else {fprintf(stderr, "Vocab file is not speicied.\n"); exit(1);}
 	if (output_file[0] == 0) {fprintf(stderr, "Output file is not specified.\n"); exit(1);}
+	ConstructBigramTable();
 	InitNet();
 	if (negative > 0) InitUnigramTable();
 
 	fin = fopen(train_file, "rb");
-	if (fin == NULL) {fprintf(stderr, "Unable to open coocurrence file %s.\n", train_file); exit(1);}
+	if (fin == NULL) {fprintf("Cannot open train file %s.\n", train_file); exit(1);}
 	fseek(fin, 0, SEEK_END);
-	file_size = ftello(fin);
-	num_lines = file_size / sizeof(CREC);
+	train_file_size = ftell(fin);
 	fclose(fin);
-	fprintf(stderr, "Read %lld lines.\n", num_lines);
 
-	lines_per_thread = (long long *) malloc (num_threads * sizeof(long long));
-	for (a = 0; a < num_threads - 1; a++) lines_per_thread[a] = num_lines / num_threads;
-	lines_per_thread[a] = num_lines / num_threads + num_lines % num_threads;
 	predict_cost = malloc(sizeof(real) * num_threads);
 	count_cost = malloc(sizeof(real) * num_threads);
 
@@ -502,7 +640,8 @@ int main()
 	int i;
 
 	strcpy(vocab_file, "vocab.txt");
-	strcpy(train_file, "cooccurrence.shuf.bin");
+	strcpy(train_file, "text8");
+	strcpy(cooccur_file, "cooccurrence.shuf.bin");
 	strcpy(output_file, "combine2.neg.noada.iter5.bin");
 
 	//Initialize the vocab with vocab_max_size
@@ -513,6 +652,8 @@ int main()
 		expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
 		expTable[i] = expTable[i] / (expTable[i] + 1);                   // Precompute f(x) = x / (x + 1)
 	}
+
+	fprintf(stderr, "Read %lld lines.\n", num_lines);
 
 	TrainModel();
 	return 0;
