@@ -33,7 +33,7 @@ int enable_count = 1;
 int verbose = 2; // 0, 1, or 2
 int binary = 1;
 int num_threads = 1; // pthreads
-int adagrad = 0;
+int adagrad = 1;
 int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
@@ -375,7 +375,7 @@ void *TrainModelThread(void *vid) {
 		}
 
 		// Optimize count error
-		if (enable_count) {
+		if (enable_count && hs) {
 			l2 = word2 * vector_size; //no bias version
 			count_grad = 0;
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2]; // current and context word are represented by the same vector space
@@ -399,7 +399,31 @@ void *TrainModelThread(void *vid) {
 					syn0_gradsq[c + l2] += temp1 * temp1;
 				}
 			}
-			// cost[id] += 0.5 * f_count_grad * count_grad;
+		}
+		if (enable_count && negative) {
+			l2 = word2 * vector_size; //no bias version
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; // current and context word are represented by the same vector space
+			count_grad -= log(cr.val); //no bias version
+			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+
+			count_cost[id] += 0.5 * f_count_grad * count_grad;
+
+			f_count_grad *= learn_rate;
+			for (c = 0; c < vector_size; c++) {
+				temp1 = f_count_grad * syn1neg[c + l2];
+				temp2 = f_count_grad * syn0[c + l1];
+				if (!adagrad) {
+					syn0[c + l1] -= temp1;
+					syn1neg[c + l2] -= temp2;
+				}
+				else {
+					syn0[c + l1] -= temp1 / sqrt(syn0_gradsq[c + l1]);
+					syn1neg[c + l2] -= temp2 / sqrt(syn1neg_gradsq[c + l2]);
+					syn0_gradsq[c + l1] += temp1 * temp1;
+					syn1neg_gradsq[c + l2] += temp1 * temp1;
+				}
+			}
 		}
 	}
 	fclose(fin);
