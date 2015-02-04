@@ -304,7 +304,6 @@ void *TrainModelThread(void *vid) {
 		// hs mode, input&output (current&context) word are in the same vector space
 		if (hs) {
 			// Compute preidcit error
-			/*
 			for (d = 0; d < vocab[word2].codelen; d++) {
 				f = 0;
 				l2 = vocab[word2].point[d] * vector_size;
@@ -329,9 +328,9 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-			*/
 
 			// Compute count error
+			/*
 			l2 = word2 * vector_size;
 			count_grad = 0;
 			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2];
@@ -358,11 +357,11 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+			*/
 		}
 		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
 			// Compute predict error
-			/*
 			for (d = 0; d < negative + 1; d++) {
 				if (d == 0) {
 					target = word2;
@@ -405,12 +404,11 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-			*/
 
 			// Compute count error
 			l2 = word2 * vector_size;
-			count_grad = 0;
-			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
+			// count_grad = 0;
+			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
 			count_grad -= log(cr.val);
 			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
 
