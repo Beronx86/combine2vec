@@ -203,17 +203,15 @@ void InitNet()
 				syn1_gradsq[a * vector_size + b] = 1.0;
 		}
 	}
-	if (negative > 0) {
-		a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * vector_size * sizeof(real));
-		if (syn1neg == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
+	a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * vector_size * sizeof(real));
+	if (syn1neg == NULL) {fprintf(stderr, "Error allocating memory for syn1\n"), exit(1);}
+	for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
+		syn1neg[a * vector_size + b] = 0;
+	if (adagrad) {
+		a = posix_memalign((void **)&syn1neg_gradsq, 128, (long long)vocab_size * vector_size *sizeof(real));
+		if (syn1neg_gradsq == NULL) {fprintf(stderr, "Error allocating memory for syn1_gradsq\n"), exit(1);}
 		for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
-			syn1neg[a * vector_size + b] = 0;
-		if (adagrad) {
-			a = posix_memalign((void **)&syn1neg_gradsq, 128, (long long)vocab_size * vector_size *sizeof(real));
-			if (syn1neg_gradsq == NULL) {fprintf(stderr, "Error allocating memory for syn1_gradsq\n"), exit(1);}
-			for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++)
-				syn1neg_gradsq[a * vector_size + b] = 1.0;
-		}
+			syn1neg_gradsq[a * vector_size + b] = 1.0;
 	}
 	for (a = 0; a < vocab_size; a++) for (b = 0; b < vector_size; b++) {
 		next_random = next_random * (unsigned long long)25214903917 + 11;
@@ -328,36 +326,6 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
-
-			// Compute count error
-			/*
-			l2 = word2 * vector_size;
-			count_grad = 0;
-			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn0[c + l2];
-			count_grad -= log(cr.val);
-			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
-
-			count_cost[id] += 0.5 * f_count_grad * count_grad;
-
-			f_count_grad *= learn_rate;
-			for (c = 0; c < vector_size; c++) {
-				neu1e[c] -= f_count_grad * syn0[c + l2];
-				neu1e_output[c] -= f_count_grad * syn0[c + l1];
-			}
-
-			if (l1 == l2) { // if word1 and word2 are the same
-				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
-			} else {
-				if (!adagrad) {
-					for (c = 0; c < vector_size; c++) syn0[c + l2] += neu1e_output[c];
-				} else {
-					for (c = 0; c < vector_size; c++) {
-						syn0[c + l2] += neu1e_output[c] / sqrt(syn0_gradsq[c + l2]);
-						syn0_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
-					}
-				}
-			}
-			*/
 		}
 		// neg mode, input (current) words are in syn0 space, output (context) words are in syn1neg space
 		if (negative > 0) {
@@ -389,6 +357,7 @@ void *TrainModelThread(void *vid) {
 
 				predict_grad = (label - f) * learn_rate;
 				if (d == 0) { // target word has two gradient source, count and predict.
+					for (c = 0; c < vector_size; c++) neu1e[c] += predict_grad * syn1neg[c + l2];
 					for (c = 0; c < vector_size; c++) neu1e_output[c] += predict_grad * syn0[c + l1];
 				} else {
 					if (!adagrad) {
@@ -404,32 +373,34 @@ void *TrainModelThread(void *vid) {
 					}
 				}
 			}
+		}
 
-			// Compute count error
-			l2 = word2 * vector_size;
-			// count_grad = 0;
-			// for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
-			count_grad -= log(cr.val);
-			f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
+		// Compute count error
+		l2 = word2 * vector_size;
+		if (hs) {
+			count_grad = 0;
+			for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
+		}
+		count_grad -= log(cr.val);
+		f_count_grad = (cr.val > x_max) ? count_grad : pow(cr.val / x_max, alpha) * count_grad;
 
-			count_cost[id] += 0.5 * f_count_grad * count_grad;
+		count_cost[id] += 0.5 * f_count_grad * count_grad;
 
-			f_count_grad *= learn_rate;
-			for (c = 0; c < vector_size; c++) {
-				neu1e[c] -= f_count_grad * syn1neg[c  +l2];
-				neu1e_output[c] -= f_count_grad * syn0[c + l1];
-			}
+		f_count_grad *= learn_rate;
+		for (c = 0; c < vector_size; c++) {
+			neu1e[c] -= f_count_grad * syn1neg[c  +l2];
+			neu1e_output[c] -= f_count_grad * syn0[c + l1];
+		}
 
-			if (l1 == l2) {
-				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
+		if (l1 == l2) {
+			for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
+		} else {
+			if (!adagrad) {
+				for (c = 0; c < vector_size; c++) syn1neg[c + l2] += neu1e_output[c];
 			} else {
-				if (!adagrad) {
-					for (c = 0; c < vector_size; c++) syn1neg[c + l2] += neu1e_output[c];
-				} else {
-					for (c = 0; c < vector_size; c++) {
-						syn1neg[c + l2] += neu1e_output[c] / sqrt(syn1neg_gradsq[c + l2]);
-						syn1neg_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
-					}
+				for (c = 0; c < vector_size; c++) {
+					syn1neg[c + l2] += neu1e_output[c] / sqrt(syn1neg_gradsq[c + l2]);
+					syn1neg_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
 				}
 			}
 		}
