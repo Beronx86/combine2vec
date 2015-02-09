@@ -43,7 +43,7 @@ int adagrad = 0;
 int num_iter = 5; // Number of full passes through cooccurrence matrix
 int save_gradsq = 0; // By default don't save squared gradient values
 int vector_size = 100; // Word vector size
-int window = 10;
+int window = 5;
 int *vocab_hash;
 long long num_lines = 0, train_file_size = 0, vocab_size = 0, vocab_max_size = 2500;
 long long word_count_actual = 0, train_words = 0;;
@@ -79,7 +79,7 @@ char *ConcatenateWord(char* word1, char* word2) {
 	return biword;
 }
 
-char *ConcatenateWord(long long word1_idx, long long word2_idx) {
+char *ConcatenateWordIdx(long long word1_idx, long long word2_idx) {
 	char *biword, *word1, *word2;
 	word1 = vocab[word1_idx].word;
 	word2 = vocab[word2_idx].word;
@@ -100,8 +100,8 @@ long long GetWordHash(char *word, long long hash_size) {
 void SaveCREC(CREC *cr) {
 	char *biword, *word1, *word2;
 	unsigned long long hash;
-	word1 = vocab[cr->word1 - 1LL].word;
-	word2 = vocab[cr->word2 - 1LL].word;
+	word1 = vocab[cr->word1].word; // the first word of vocab is </s>, so word index start from 1 now.
+	word2 = vocab[cr->word2].word; // there is not need to minus 1.
 	biword = ConcatenateWord(word1, word2);
 	hash = GetWordHash(biword, bigram_hash_size);
 	while (bigram_table[hash] != NULL) hash = (hash + 1) % bigram_hash_size;
@@ -125,7 +125,7 @@ void ConstructBigramTable() {
 	CREC cr;
 	long long a, n = 0, file_size;
 
-	fin = fopen(train_file, "rb");
+	fin = fopen(cooccur_file, "rb");
 	if (fin == NULL) {fprintf(stderr, "Unable to open coocurrence file %s.\n", train_file); exit(1);}
 	fseek(fin, 0, SEEK_END);
 	file_size = ftello(fin);
@@ -172,7 +172,7 @@ void ReadWord(char *word, FILE *fin) {
 
 // Returns position of a word in the vocabulary; if the word is not found, returns -1
 int SearchVocab(char *word) {
-  unsigned int hash = GetWordHash(word);
+  unsigned int hash = GetWordHash(word, vocab_hash_size);
   while (1) {
     if (vocab_hash[hash] == -1) return -1;
     if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];
@@ -236,6 +236,7 @@ void ReadVocab() {
 	sprintf(format, "%%%ds %%lld", MAX_STRING_LENGTH);
 
 	vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
+	for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
 
 	while (fscanf(fid, format, word, &count) != EOF) {
 		AddWordToVocab(word, count);
@@ -379,9 +380,9 @@ void *TrainModelThread(void *vid) {
 	long long local_iter = num_iter, word_count = 0, pair_count = 0, last_word_count = 0;
 	long long id = (long long) vid;
 	unsigned long long next_random = id;
-	long long biword_count_val;
 	char *biword;
 	real f, predict_grad, count_grad, f_count_grad;
+	real biword_count_val;
 	real temp;
 	real *neu1e = (real *)calloc(vector_size, sizeof(real));
 	real *neu1e_output = (real *)calloc(vector_size, sizeof(real)); // when using adagrad, neu1e is the error for output (context) word
@@ -544,32 +545,35 @@ void *TrainModelThread(void *vid) {
 				count_grad = 0;
 				for (c = 0; c < vector_size; c++) count_grad += syn0[c + l1] * syn1neg[c + l2]; //this line is replicated, reduce it may improve speed
 			}
-			biword = ConcatenateWord(last_word, word);
+			biword = ConcatenateWordIdx(word, last_word);
 			biword_count_val = GetCount(biword);
-			free(biword);
 
-			count_grad -= log(biword_count_val);
-			f_count_grad = (biword_count_val > x_max) ? count_grad : pow(biword_count_val / x_max, alpha) * count_grad;
+			if (biword_count_val != 0.) {
+				count_grad -= log(biword_count_val);
+				f_count_grad = (biword_count_val > x_max) ? count_grad : pow(biword_count_val / x_max, alpha) * count_grad;
 
-			count_cost[id] += 0.5 * f_count_grad * count_grad;
+				count_cost[id] += 0.5 * f_count_grad * count_grad;
 
-			f_count_grad *= learn_rate;
-			for (c = 0; c < vector_size; c++) {
-				neu1e[c] -= f_count_grad * syn1neg[c  +l2];
-				neu1e_output[c] -= f_count_grad * syn0[c + l1];
-			}
+				f_count_grad *= learn_rate;
+				for (c = 0; c < vector_size; c++) {
+					neu1e[c] -= f_count_grad * syn1neg[c  +l2];
+					neu1e_output[c] -= f_count_grad * syn0[c + l1];
+				}
 
-			if (l1 == l2) {
-				for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
-			} else {
-				if (!adagrad) {
-					for (c = 0; c < vector_size; c++) syn1neg[c + l2] += neu1e_output[c];
+				if (l1 == l2) {
+					for (c = 0; c < vector_size; c++) neu1e[c] += neu1e_output[c];
 				} else {
-					for (c = 0; c < vector_size; c++) {
-						syn1neg[c + l2] += neu1e_output[c] / sqrt(syn1neg_gradsq[c + l2]);
-						syn1neg_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
+					if (!adagrad) {
+						for (c = 0; c < vector_size; c++) syn1neg[c + l2] += neu1e_output[c];
+					} else {
+						for (c = 0; c < vector_size; c++) {
+							syn1neg[c + l2] += neu1e_output[c] / sqrt(syn1neg_gradsq[c + l2]);
+							syn1neg_gradsq[c + l2] += neu1e_output[c] * neu1e_output[c];
+						}
 					}
 				}
+			} else {
+				fprintf(stderr, "%s bigword count is 0.\n", biword);
 			}
 
 			if (!adagrad) {
@@ -582,6 +586,7 @@ void *TrainModelThread(void *vid) {
 				}
 			}
 
+			free(biword);
 			pair_count++;
 		}
 		sentence_position++;
